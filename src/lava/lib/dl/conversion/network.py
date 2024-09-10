@@ -48,11 +48,7 @@ class Network(torch.nn.Module):
                 x = self.buffer[idx + blk_inp]
             else:
                 x = y
-            # print(f'{x.flatten() = }')
-            # print(f'{blk = }')
             y = blk(x)
-            # print(f'{y.shape = }')
-            # print()
             if self.blk_save[idx] or self.store_all_buffer:
                 self.buffer[idx] = y.clone()
 

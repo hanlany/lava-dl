@@ -4,8 +4,8 @@
 import torch
 import torch.nn.functional as F
 
-from ..synapse import Dense, Conv
-from ..utils.quantize import QuantizeAndClamp, MODE
+from lava.lib.dl.slayer.synapse import Dense, Conv
+from lava.lib.dl.slayer.utils.quantize import QuantizeAndClamp, MODE
 
 
 class AbstractBlock(torch.nn.Module):
@@ -153,12 +153,6 @@ class AbstractBlock(torch.nn.Module):
                 if validate:
                     z_diff = z_int - z / self.activation.quantizer.step
                     if torch.abs(z_diff).max() > 0:
-                        # print(f'{z.shape = }')
-                        # print(f'{z_int[0, 0, 0, 0] = }')
-                        # print(f'{z[0, 0, 0, 0] / self.activation.quantizer.step = }')
-
-                        # print(f'{(z / self.activation.quantizer.step)[z_diff != 0].flatten() = }')
-                        # print(f'{z_int[z_diff != 0].flatten() = }')
                         print('Validation WARNING: f(w*x + bias) error[int] = '
                               f'{torch.abs(z_diff).max()}')
                         # assert False
