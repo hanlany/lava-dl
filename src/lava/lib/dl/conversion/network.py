@@ -50,7 +50,7 @@ class Network(torch.nn.Module):
                 x = y
             y = blk(x)
             if self.blk_save[idx] or self.store_all_buffer:
-                self.buffer[idx] = y.clone()
+                self.buffer[idx] = y
 
     def forward(self, *inputs):
         input_depth = - len(inputs)

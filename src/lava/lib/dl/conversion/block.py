@@ -117,7 +117,7 @@ class AbstractBlock(torch.nn.Module):
                           f'{torch.abs(wgt_diff).max()}')
 
             z_int = self.synapse_quant(x_int.to(torch.float64),
-                                     weight_int.to(torch.float64)).to(torch.int32)
+                                       weight_int.to(torch.float64)).to(torch.int32)
 
             num = 32 - self.num_var_bits
             z_int = (z_int << num) >> num
