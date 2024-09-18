@@ -1,0 +1,10 @@
+b : 32
+epoch : 100
+exp : 001
+gpu : [0]
+lam : 0.01
+lr : 0.001
+maxrate : 0.01
+seed : None
+seq : 1
+step : [60, 120, 160]
