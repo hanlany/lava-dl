@@ -43,7 +43,8 @@ class Delta(AbstractActivation):
                 delta = x[..., t] - act_last
                 y[..., t] = torch.where(torch.abs(delta) >= threshold.to(x.device),
                                         delta, 0 * delta)
-                act_last = act_last + delta
+                # act_last = act_last + delta
+                act_last = act_last + y[..., t]
         return y
 
     def forward_full(self, x):
