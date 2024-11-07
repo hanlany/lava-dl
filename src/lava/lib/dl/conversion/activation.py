@@ -13,6 +13,7 @@ class AbstractActivation(torch.nn.Module):
         super().__init__()
         self._quantized = False
         self._validate = False
+        self.shape = None
 
     def fixed_precision(self, validate=False):
         self._quantized = True
@@ -24,8 +25,12 @@ class AbstractActivation(torch.nn.Module):
 
     def forward(self, x):
         if self._quantized:
-            return self.forward_quant(x)
-        return self.forward_full(x)
+            x = self.forward_quant(x)
+        else:
+            x = self.forward_full(x)
+        if self.shape is None:
+            self.shape = x.shape[1:-1]
+        return x
 
 class Delta(AbstractActivation):
     def __init__(self, threshold, num_msg_bits=16, msg_exp=6) -> None:
@@ -33,7 +38,6 @@ class Delta(AbstractActivation):
         self.quantizer = QuantizeAndClamp(num_bits=num_msg_bits,
                                                 step=1 / (1 << msg_exp))
         self.threshold = self.quantizer(torch.tensor([threshold]))
-
 
     def forward_dynamics(self, x, threshold):
         y = torch.zeros_like(x)
@@ -54,11 +58,20 @@ class Delta(AbstractActivation):
         if torch.is_floating_point(x_int):
             x_int = (self.quantizer(x_int) /
                      self.quantizer.step).to(torch.int16)
-        threshold_int = self.quantizer.quantize(self.threshold).to(torch.int16)
-        y_int = self.forward_dynamics(x_int, threshold_int)
+        y_int = self.forward_dynamics(x_int, self.threshold_int)
         return y_int.to(torch.int16)
 
+    @property
+    def threshold_int(self):
+        return self.quantizer.quantize(self.threshold).to(torch.int16)
 
+    @property
+    def device_params(self):
+        """Dictionary of device parameters."""
+        return {
+            'type': 'delta',
+            'vth': self.threshold_int.item(),
+        }
 
 class SigmaDeltaReLU(AbstractActivation):
     def __init__(self, threshold, num_msg_bits=16, msg_exp=6, wgt_exp=6) -> None:
@@ -77,8 +90,12 @@ class SigmaDeltaReLU(AbstractActivation):
 
     def forward(self, x):
         if self._quantized:
-            return self.forward_quant(x)
-        return self.forward_full(x)
+            x = self.forward_quant(x)
+        else:
+            x = self.forward_full(x)
+        if self.shape is None:
+            self.shape = x.shape[1:-1]
+        return x
 
     def forward_full(self, x):
         x = self.sigma(x)
@@ -91,11 +108,23 @@ class SigmaDeltaReLU(AbstractActivation):
     def forward_quant(self, x_int):
         x_int = self.sigma(x_int).to(torch.int32)
         x_int = (x_int >> self.wgt_exp).to(torch.int16)
-        x_int += self.quantizer.quantize(self.bias).to(x_int.device).to(torch.int16)
+        x_int += self.bias_int.to(x_int.device)
         x_int = self.activation(x_int)
         x_int = self.delta.forward_quant(x_int)
         return x_int.to(torch.int16)
 
+    @property
+    def bias_int(self):
+        return self.quantizer.quantize(self.bias).to(torch.int16)
+
+    @property
+    def device_params(self):
+        """Dictionary of device parameters."""
+        return {
+            'type': f'SigmaDelta{self.activation.__name__.capitalize()}',
+            'vth': self.delta.threshold_int.item(),
+            'wgtExp': self.wgt_exp,
+        }
 
 
 class Sigma(AbstractActivation):
@@ -119,5 +148,17 @@ class Sigma(AbstractActivation):
     def forward_quant(self, x):
         x = self.sigma(x)
         x = (x >> self.wgt_exp).to(torch.int16)
-        x += self.quantizer.quantize(self.bias).to(x.device).to(torch.int16)
+        x += self.bias_int.to(x.device)
         return x.to(torch.int16)
+
+    @property
+    def bias_int(self):
+        return self.quantizer.quantize(self.bias).to(torch.int16)
+
+    @property
+    def device_params(self):
+        """Dictionary of device parameters."""
+        return {
+            'type': 'Sigma',
+            'wgtExp': self.wgt_exp,
+        }

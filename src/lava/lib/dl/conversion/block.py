@@ -1,6 +1,7 @@
 # Copyright (C) 2022 Intel Corporation
 # SPDX-License-Identifier:  BSD-3-Clause
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -168,6 +169,8 @@ class AbstractBlock(torch.nn.Module):
                           f'{torch.abs(z_diff).max()}')
             return z_int
 
+    # def export_hdf5(self, handle):
+    #     raise NotImplementedError
 
 class DenseBlock(AbstractBlock):
     def __init__(self, in_neurons, out_neurons,
@@ -205,6 +208,47 @@ class DenseBlock(AbstractBlock):
                 self.synapse.dilation, self.synapse.groups,
             )
 
+    def export_hdf5(self, handle):
+        def weight(s):
+            return s.pre_hook_fx(
+                s.weight, descale=True
+            ).reshape(s.weight.shape[:2]).cpu().data.numpy()
+
+        # def delay(d):
+        #     return torch.floor(d.delay).flatten().cpu().data.numpy()
+
+        handle.create_dataset(
+            'type', (1, ), 'S10', ['dense'.encode('ascii', 'ignore')]
+        )
+
+        handle.create_dataset('shape', data=np.array(self.activation.shape))
+        handle.create_dataset('inFeatures', data=self.synapse.in_channels)
+        handle.create_dataset('outFeatures', data=self.synapse.out_channels)
+
+        # weights
+        if self.synapse.weight_norm_enabled:
+            self.synapse.disable_weight_norm()
+
+        wgt = self.synapse.weight.data
+        weight_int = self.wgt_quantizer.quantize(wgt).to(torch.int8)
+        weight_int = weight_int.reshape(wgt.shape[:2]).cpu().data.numpy()
+        handle.create_dataset('weight', data=weight_int)
+
+        # bias
+        if hasattr(self.activation, 'bias'):
+            handle.create_dataset(
+                'bias',
+                data=self.activation.bias_int.cpu().data.numpy().flatten()
+            )
+
+        # # delay
+        # if self.delay is not None:
+        #     self.delay.clamp()  # clamp the delay value
+        #     handle.create_dataset('delay', data=delay(self.delay))
+
+        # neuron
+        for key, value in self.activation.device_params.items():
+            handle.create_dataset(f'neuron/{key}', data=value)
 
 class ConvBlock(AbstractBlock):
     def __init__(self, in_channels, out_channels, kernel_size,
@@ -235,10 +279,65 @@ class ConvBlock(AbstractBlock):
             self.synapse.dilation, self.synapse.groups,
         ).to(torch.int32)
 
+    def export_hdf5(self, handle):
+        def weight(s):
+            return s.pre_hook_fx(
+                s.weight, descale=True
+            ).reshape(s.weight.shape[:2]).cpu().data.numpy()
+
+        handle.create_dataset(
+            'type', (1, ), 'S10', ['conv'.encode('ascii', 'ignore')]
+        )
+        handle.create_dataset('shape', data=np.array(self.activation.shape))
+        handle.create_dataset('inChannels', data=self.synapse.in_channels)
+        handle.create_dataset('outChannels', data=self.synapse.out_channels)
+        handle.create_dataset('kernelSize', data=self.synapse.kernel_size[:-1])
+        handle.create_dataset('stride', data=self.synapse.stride[:-1])
+        handle.create_dataset('padding', data=self.synapse.padding[:-1])
+        handle.create_dataset('dilation', data=self.synapse.dilation[:-1])
+        handle.create_dataset('groups', data=self.synapse.groups)
+
+        # weights
+        if self.synapse.weight_norm_enabled:
+            self.synapse.disable_weight_norm()
+
+        wgt = self.synapse.weight.data
+        weight_int = self.wgt_quantizer.quantize(wgt).to(torch.int8)
+        weight_int = weight_int.reshape(wgt.shape[:-1]).cpu().data.numpy()
+        handle.create_dataset('weight', data=weight_int)
+
+        # bias
+        if hasattr(self.activation, 'bias'):
+            handle.create_dataset(
+                'bias',
+                data=self.activation.bias_int.cpu().data.numpy().flatten()
+            )
+
+        # neuron
+        for key, value in self.activation.device_params.items():
+            handle.create_dataset(f'neuron/{key}', data=value)
+
 
 class Flatten(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
+        self.shape = None
 
     def forward(self, x):
-        return x.reshape((x.shape[0], -1, x.shape[-1]))
+        x = x.reshape((x.shape[0], -1, x.shape[-1]))
+        if self.shape is None:
+            self.shape = x.shape[1:-1]
+        return x
+
+    def export_hdf5(self, handle):
+        """Hdf5 export method for the block.
+
+        Parameters
+        ----------
+        handle : file handle
+            hdf5 handle to export block description.
+        """
+        handle.create_dataset(
+            'type', (1, ), 'S10', ['flatten'.encode('ascii', 'ignore')]
+        )
+        handle.create_dataset('shape', data=np.array(self.shape))

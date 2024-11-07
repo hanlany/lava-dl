@@ -1,6 +1,8 @@
 # Copyright (C) 2022 Intel Corporation
 # SPDX-License-Identifier:  BSD-3-Clause
 
+import h5py
+import numpy as np
 import torch
 
 class Network(torch.nn.Module):
@@ -73,3 +75,24 @@ class Network(torch.nn.Module):
                 else:
                     outputs.append(output)
             return (*outputs, )
+
+    def export_hdf5(self, filename):
+        # network export to hdf5 format
+        h = h5py.File(filename, 'w')
+        layer = h.create_group('layer')
+        for i, b in enumerate(self.blocks):
+            # TODO expand to support branching and recurrence
+            handle = layer.create_group(f'{i}')
+            if hasattr(b, 'export_hdf5'):
+                b.export_hdf5(handle)
+            elif hasattr(b, 'device_params'):
+                handle.create_dataset(
+                    'type', (1, ), 'S10', ['input'.encode('ascii', 'ignore')]
+                )
+                handle.create_dataset('shape', data=np.array(b.shape))
+                for key, value in b.device_params.items():
+                    handle.create_dataset(f'neuron/{key}', data=value)
+            else:
+                print('Export method not found for')
+                print(b)
+                print('SKIPPING export.')
