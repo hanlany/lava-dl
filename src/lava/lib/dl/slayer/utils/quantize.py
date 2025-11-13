@@ -136,6 +136,7 @@ class QuantizeAndClamp:
         self.step = step
         self.amax = ((1 << num_bits - 1) - 1) * self.step
         self.quant_mode = quant_mode
+        self.disable = False
 
     def __call__(self,
                  x: torch.tensor,
@@ -157,6 +158,10 @@ class QuantizeAndClamp:
         """
         if mode is None:
             mode = self.quant_mode
+
+        if self.disable:
+            return x
+
         return quantize(x,
                         step=self.step,
                         mode=mode).clamp(-self.amax, self.amax)

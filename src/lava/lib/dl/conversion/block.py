@@ -5,8 +5,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from lava.lib.dl.slayer.synapse import Dense, Conv
+from lava.lib.dl.slayer.synapse import Dense, Conv, Unpool
 from lava.lib.dl.slayer.utils.quantize import QuantizeAndClamp, MODE
+
+from .activation import Sigma, Delta
 
 
 class AbstractBlock(torch.nn.Module):
@@ -23,6 +25,7 @@ class AbstractBlock(torch.nn.Module):
         self.wgt_exp = wgt_exp
         self.num_da_bits = 24
         self.num_var_bits = 24
+        self.shape = None
 
         self.activation = activation
 
@@ -31,25 +34,31 @@ class AbstractBlock(torch.nn.Module):
         else:
             self.input_quantizer = QuantizeAndClamp(num_bits=num_msg_bits,
                                                     step=1 / (1 << msg_exp))
-        self.wgt_quantizer = QuantizeAndClamp(num_bits=num_wgt_bits,
-                                              step=1 / (1 << wgt_exp))
-        self.da_quantizer = QuantizeAndClamp(num_bits=self.num_da_bits,
-                                             step=1 / (1 << msg_exp + wgt_exp))
-        self.bias_quantizer = QuantizeAndClamp(num_bits=self.num_var_bits,
-                                               step=1 / (1 << msg_exp + wgt_exp))
+        self.wgt_quantizer = QuantizeAndClamp(
+            num_bits=num_wgt_bits, step=1 / (2**wgt_exp)
+        )
+        self.da_quantizer = QuantizeAndClamp(
+            num_bits=self.num_da_bits, step=1 / (1 << msg_exp + wgt_exp)
+        )
+        self.bias_quantizer = QuantizeAndClamp(
+            num_bits=self.num_var_bits, step=1 / (1 << msg_exp + wgt_exp)
+        )
 
         post_scale_exp = msg_exp + wgt_exp + num_scale_bits - scale_exp
-        self.scale_quantizer = QuantizeAndClamp(num_bits=num_scale_bits + 1,
-                                                step=1 / (1 << scale_exp))
-        self.post_scale_quantizer = QuantizeAndClamp(num_bits=self.num_da_bits,
-                                                     step=1 / (1 << post_scale_exp))
+        self.scale_quantizer = QuantizeAndClamp(
+            num_bits=num_scale_bits + 1, step=1 / (1 << scale_exp)
+        )
+        self.post_scale_quantizer = QuantizeAndClamp(
+            num_bits=self.num_da_bits, step=1 / (1 << post_scale_exp)
+        )
+
         self.scale = self.scale_quantizer(torch.tensor([scale]))
         self.scale_exp = scale_exp
         if self.scale == 1:
             self.scale = None  # No need to apply scale
 
         self.synapse = None
-        self.bias = None
+        self.register_parameter('bias', None)
 
 
     def synapse_quant(self,
@@ -208,18 +217,27 @@ class DenseBlock(AbstractBlock):
                 self.synapse.dilation, self.synapse.groups,
             )
 
-    def export_hdf5(self, handle):
+    def export_hdf5(self, handle, inputs_id=-1):
         def weight(s):
-            return s.pre_hook_fx(
-                s.weight, descale=True
-            ).reshape(s.weight.shape[:2]).cpu().data.numpy()
+            return (
+                s.pre_hook_fx(s.weight, descale=True)
+                .reshape(s.weight.shape[:2])
+                .cpu()
+                .data.numpy()
+            )
 
         # def delay(d):
         #     return torch.floor(d.delay).flatten().cpu().data.numpy()
 
         handle.create_dataset(
-            'type', (1, ), 'S10', ['dense'.encode('ascii', 'ignore')]
+            'type', (1,), 'S10', ['dense'.encode('ascii', 'ignore')]
         )
+
+        if isinstance(inputs_id, list):
+            handle.create_dataset('inputIds', data=np.array(inputs_id))
+
+        elif inputs_id != -1:
+            handle.create_dataset('inputIds', data=inputs_id)
 
         handle.create_dataset('shape', data=np.array(self.activation.shape))
         handle.create_dataset('inFeatures', data=self.synapse.in_channels)
@@ -238,7 +256,7 @@ class DenseBlock(AbstractBlock):
         if hasattr(self.activation, 'bias'):
             handle.create_dataset(
                 'bias',
-                data=self.activation.bias_int.cpu().data.numpy().flatten()
+                data=self.activation.bias_int.cpu().data.numpy().flatten(),
             )
 
         # # delay
@@ -247,8 +265,14 @@ class DenseBlock(AbstractBlock):
         #     handle.create_dataset('delay', data=delay(self.delay))
 
         # neuron
+        # if self.activation is not None:
         for key, value in self.activation.device_params.items():
+            if key == 'wgtExp':
+                if value < 0:
+                    handle.create_dataset(key, data=-value)
+                    value = 0
             handle.create_dataset(f'neuron/{key}', data=value)
+
 
 class ConvBlock(AbstractBlock):
     def __init__(self, in_channels, out_channels, kernel_size,
@@ -279,15 +303,26 @@ class ConvBlock(AbstractBlock):
             self.synapse.dilation, self.synapse.groups,
         ).to(torch.int32)
 
-    def export_hdf5(self, handle):
+    def export_hdf5(self, handle, inputs_id=-1):
         def weight(s):
-            return s.pre_hook_fx(
-                s.weight, descale=True
-            ).reshape(s.weight.shape[:2]).cpu().data.numpy()
+            return (
+                s.pre_hook_fx(s.weight, descale=True)
+                .reshape(s.weight.shape[:2])
+                .cpu()
+                .data.numpy()
+            )
 
         handle.create_dataset(
-            'type', (1, ), 'S10', ['conv'.encode('ascii', 'ignore')]
+            'type', (1,), 'S10', ['conv'.encode('ascii', 'ignore')]
         )
+
+        if isinstance(inputs_id, list):
+            handle.create_dataset('inputIds', data=np.array(inputs_id))
+
+        elif inputs_id != -1:
+            handle.create_dataset('inputIds', data=inputs_id)
+
+        # if self.activation is not None:
         handle.create_dataset('shape', data=np.array(self.activation.shape))
         handle.create_dataset('inChannels', data=self.synapse.in_channels)
         handle.create_dataset('outChannels', data=self.synapse.out_channels)
@@ -306,16 +341,112 @@ class ConvBlock(AbstractBlock):
         weight_int = weight_int.reshape(wgt.shape[:-1]).cpu().data.numpy()
         handle.create_dataset('weight', data=weight_int)
 
+        # if self.activation is not None:
         # bias
         if hasattr(self.activation, 'bias'):
             handle.create_dataset(
                 'bias',
-                data=self.activation.bias_int.cpu().data.numpy().flatten()
+                data=self.activation.bias_int.cpu().data.numpy().flatten(),
             )
 
+        # if self.activation is not None:
         # neuron
         for key, value in self.activation.device_params.items():
+            if key == 'wgtExp':
+                if value < 0:
+                    handle.create_dataset(key, data=-value)
+                    value = 0
             handle.create_dataset(f'neuron/{key}', data=value)
+
+
+class UnpoolBlock(AbstractBlock):
+    def __init__(
+        self,
+        kernel_size,
+        stride=2,
+        padding=0,
+        dilation=1,
+        activation=None,
+        bias=None,
+        num_msg_bits=16,
+        msg_exp=6,
+        num_wgt_bits=8,
+        wgt_exp=0,
+        num_scale_bits=16,
+        scale_exp=12,
+        scale=1.0,
+    ) -> None:
+        super().__init__(
+            activation=activation,
+            bias=bias,
+            num_msg_bits=num_msg_bits,
+            msg_exp=msg_exp,
+            num_wgt_bits=num_wgt_bits,
+            wgt_exp=wgt_exp,
+            num_scale_bits=num_scale_bits,
+            scale_exp=scale_exp,
+            scale=scale,
+        )
+
+        self.synapse = Unpool(
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            pre_hook_fx=self.wgt_quantizer,
+        )
+
+    def synapse_quant(
+        self, x_int: torch.tensor, weight_int: torch.tensor
+    ) -> torch.tensor:
+        in_shape = x_int.shape
+        x_int = x_int.reshape((in_shape[0], 1, -1, in_shape[3], in_shape[4]))
+
+        result = F.conv_transpose3d(
+            x_int.to(torch.float64),
+            weight_int.to(torch.float64),
+            stride=self.synapse.stride,
+            padding=self.synapse.padding,
+            dilation=self.synapse.dilation,
+        )
+        out = result.reshape(
+            (
+                result.shape[0],
+                in_shape[1],
+                -1,
+                result.shape[3],
+                result.shape[4],
+            )
+        )
+
+        if self.shape is None:
+            self.shape = out.shape[1:-1]
+
+        return out
+
+    def export_hdf5(self, handle, inputs_id=-1):
+        """Hdf5 export method for the block.
+
+        Parameters
+        ----------
+        handle : file handle
+            hdf5 handle to export block description.
+        """
+        handle.create_dataset(
+            'type', (1,), 'S10', ['unpool'.encode('ascii', 'ignore')]
+        )
+
+        if isinstance(inputs_id, list):
+            handle.create_dataset('inputIds', data=np.array(inputs_id))
+
+        elif inputs_id != -1:
+            handle.create_dataset('inputIds', data=inputs_id)
+
+        handle.create_dataset('shape', data=np.array(self.shape))
+        handle.create_dataset('kernelSize', data=self.synapse.kernel_size[:-1])
+        handle.create_dataset('stride', data=self.synapse.stride[:-1])
+        handle.create_dataset('padding', data=self.synapse.padding[:-1])
+        handle.create_dataset('dilation', data=self.synapse.dilation[:-1])
 
 
 class Flatten(torch.nn.Module):
@@ -329,7 +460,7 @@ class Flatten(torch.nn.Module):
             self.shape = x.shape[1:-1]
         return x
 
-    def export_hdf5(self, handle):
+    def export_hdf5(self, handle, inputs_id=-1):
         """Hdf5 export method for the block.
 
         Parameters
@@ -338,6 +469,170 @@ class Flatten(torch.nn.Module):
             hdf5 handle to export block description.
         """
         handle.create_dataset(
-            'type', (1, ), 'S10', ['flatten'.encode('ascii', 'ignore')]
+            'type', (1,), 'S10', ['flatten'.encode('ascii', 'ignore')]
         )
+
+        if isinstance(inputs_id, list):
+            handle.create_dataset('inputIds', data=np.array(inputs_id))
+
+        elif inputs_id != -1:
+            handle.create_dataset('inputIds', data=inputs_id)
+
         handle.create_dataset('shape', data=np.array(self.shape))
+
+
+class CatBlock(torch.nn.Module):
+    def __init__(self, dim=1) -> None:
+        super().__init__()
+        self.dim = dim
+        self.shape = None
+
+    def forward(self, x_list):
+        output = torch.cat(x_list, dim=self.dim)
+        if self.shape is None:
+            self.shape = output.shape[1:-1]
+        return output
+
+    def export_hdf5(self, handle, inputs_id=-1):
+        """Hdf5 export method for the block.
+
+        Parameters
+        ----------
+        handle : file handle
+            hdf5 handle to export block description.
+        """
+        handle.create_dataset(
+            'type', (1,), 'S10', ['cat'.encode('ascii', 'ignore')]
+        )
+
+        if isinstance(inputs_id, list):
+            handle.create_dataset('inputIds', data=np.array(inputs_id))
+
+        elif inputs_id != -1:
+            handle.create_dataset('inputIds', data=inputs_id)
+
+        handle.create_dataset('axis', data=self.dim)
+        handle.create_dataset('shape', data=np.array(self.shape))
+
+
+class AddBlock(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.shape = None
+
+    def forward(self, x_list):
+        result = sum(x_list)
+        if self.shape is None:
+            self.shape = result.shape[1:-1]
+        return result
+
+    def export_hdf5(self, handle, inputs_id=-1):
+        """Hdf5 export method for the block.
+
+        Parameters
+        ----------
+        handle : file handle
+            hdf5 handle to export block description.
+        """
+        handle.create_dataset(
+            'type', (1,), 'S10', ['add'.encode('ascii', 'ignore')]
+        )
+
+        if isinstance(inputs_id, list):
+            handle.create_dataset('inputIds', data=np.array(inputs_id))
+
+        elif inputs_id != -1:
+            handle.create_dataset('inputIds', data=inputs_id)
+
+        handle.create_dataset('shape', data=np.array(self.shape))
+
+
+class MaxPoolingBlock(AbstractBlock):
+    def __init__(
+        self, kernel_size, stride=None, padding=0, dilation=1
+    ) -> None:
+        super().__init__()
+
+        # kernel
+        if isinstance(kernel_size, int):
+            self.kernel = (kernel_size, kernel_size, 1)
+        elif len(kernel_size) == 2:
+            self.kernel = (kernel_size[0], kernel_size[1], 1)
+        else:
+            raise Exception(
+                f'kernel_size can only be of 1 or 2 dimension. '
+                f'Found {kernel_size.shape=}'
+            )
+
+        # stride
+        if stride is None:
+            self.stride = self.kernel
+        elif isinstance(stride, int):
+            self.stride = (stride, stride, 1)
+        elif len(stride) == 2:
+            self.stride = (stride[0], stride[1], 1)
+        else:
+            raise Exception(
+                f'stride can be either int or tuple of size 2. '
+                f'Found {stride.shape=}'
+            )
+
+        # padding
+        if isinstance(padding, int):
+            self.padding = (padding, padding, 0)
+        elif len(padding) == 2:
+            self.padding = (padding[0], padding[1], 0)
+        else:
+            raise Exception(
+                f'padding can be either int or tuple of size 2. '
+                f'Found {padding.shape=}'
+            )
+
+        # dilation
+        if isinstance(dilation, int):
+            self.dilation = (dilation, dilation, 1)
+        elif len(dilation) == 2:
+            self.dilation = (dilation[0], dilation[1], 1)
+        else:
+            raise Exception(
+                f'dilation can be either int or tuple of size 2. '
+                f'Found {dilation.shape=}'
+            )
+
+        self.sigma = Sigma()
+        self.delta = Delta(threshold=0)
+        # self.shape = None
+
+    def forward(self, x_int):
+        x_int = self.sigma(x_int)
+        x_int = F.max_pool3d(
+            x_int, self.kernel, self.stride, self.padding, self.dilation
+        )
+        output = self.delta(x_int)
+        if self.shape is None:
+            self.shape = output.shape[1:-1]
+        return output
+
+    def export_hdf5(self, handle, inputs_id=-1):
+        """Hdf5 export method for the block.
+
+        Parameters
+        ----------
+        handle : file handle
+            hdf5 handle to export block description.
+        """
+        handle.create_dataset(
+            'type', (1,), 'S10', ['maxpool'.encode('ascii', 'ignore')]
+        )
+
+        if isinstance(inputs_id, list):
+            handle.create_dataset('inputIds', data=np.array(inputs_id))
+
+        elif inputs_id != -1:
+            handle.create_dataset('inputIds', data=inputs_id)
+
+        handle.create_dataset('shape', data=np.array(self.shape))
+        handle.create_dataset('kernelSize', data=self.kernel[:-1])
+        handle.create_dataset('stride', data=self.stride[:-1])
+        handle.create_dataset('padding', data=self.padding[:-1])
+        handle.create_dataset('dilation', data=self.dilation[:-1])

@@ -162,3 +162,21 @@ class Sigma(AbstractActivation):
             'type': 'Sigma',
             'wgtExp': self.wgt_exp,
         }
+
+class Eye(AbstractActivation):
+    def __init__(self) -> None:
+        super().__init__()
+        self.wgt_exp = 0
+
+    def forward(self, x):
+        if self.shape is None:
+            self.shape = x.shape[1:-1]
+        return x
+
+    @property
+    def device_params(self):
+        """Dictionary of device parameters."""
+        return {
+            'type': 'Eye',
+            'wgtExp': self.wgt_exp,
+        }

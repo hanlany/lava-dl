@@ -37,7 +37,11 @@ class Network(torch.nn.Module):
         self.blk_save = [False] * len(self.blocks)
         for idx, blk_inp in enumerate(self.blk_inps):
             if blk_inp != -1:
-                self.blk_save[idx + blk_inp] = True
+                if type(blk_inp) is list:
+                    for i in blk_inp:
+                        self.blk_save[idx + i] = True
+                else:
+                    self.blk_save[idx + blk_inp] = True
         for idx in self.output_idx:
             self.blk_save[idx] = True
 
@@ -46,7 +50,10 @@ class Network(torch.nn.Module):
         if self.blk_save is None:
             self.setup_buffer()
         for idx, (blk, blk_inp) in enumerate(zip(self.blocks, self.blk_inps)):
-            if y is None or blk_inp != -1:
+            # print(idx, blk, blk_inp)
+            if type(blk_inp) is list:
+                x = [self.buffer[idx + i] for i in blk_inp]
+            elif y is None or blk_inp != -1:
                 x = self.buffer[idx + blk_inp]
             else:
                 x = y
@@ -55,7 +62,7 @@ class Network(torch.nn.Module):
                 self.buffer[idx] = y
 
     def forward(self, *inputs):
-        input_depth = - len(inputs)
+        input_depth = -len(inputs)
         for idx, inp in enumerate(inputs):
             self.buffer[input_depth + idx] = inp
         self.forward_buffer()
@@ -74,20 +81,21 @@ class Network(torch.nn.Module):
                     outputs.append(self.blocks[idx].dequantize(output))
                 else:
                     outputs.append(output)
-            return (*outputs, )
+            return (*outputs,)
 
     def export_hdf5(self, filename):
         # network export to hdf5 format
         h = h5py.File(filename, 'w')
         layer = h.create_group('layer')
         for i, b in enumerate(self.blocks):
-            # TODO expand to support branching and recurrence
+            print(f'Exporting block {i} {b}')
+
             handle = layer.create_group(f'{i}')
             if hasattr(b, 'export_hdf5'):
-                b.export_hdf5(handle)
+                b.export_hdf5(handle, self.blk_inps[i])
             elif hasattr(b, 'device_params'):
                 handle.create_dataset(
-                    'type', (1, ), 'S10', ['input'.encode('ascii', 'ignore')]
+                    'type', (1,), 'S10', ['input'.encode('ascii', 'ignore')]
                 )
                 handle.create_dataset('shape', data=np.array(b.shape))
                 for key, value in b.device_params.items():
