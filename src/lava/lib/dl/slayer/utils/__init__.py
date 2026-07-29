@@ -7,11 +7,19 @@ from .stats import LearningStat, LearningStats
 from .quantize import quantize, quantize_hook_fx
 from .quantize import MODE as QUANTIZE_MODE
 from .assistant import Assistant
+from .weight_decomposition import (
+    DecomposedWeightQuantizer,
+    SignMode,
+    WeightChunk,
+    WeightDecomposer,
+)
 
 __all__ = [
     'filter', 'time',
     'staticproperty', 'diagonal_mask',
     'dotdict', 'LearningStat',
     'LearningStats', 'quantize',
-    'QUANTIZE_MODE', 'Assistant'
+    'QUANTIZE_MODE', 'Assistant',
+    'SignMode', 'WeightChunk', 'WeightDecomposer',
+    'DecomposedWeightQuantizer',
 ]
